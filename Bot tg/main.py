@@ -1,105 +1,54 @@
 import logging
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
-)
-from telegram import BotCommand 
-from handlers import (
-    start, back_handler, start_exchange, select_crypto, select_input_type, 
-    process_amount, handle_confirmation_details, handle_wallet, handle_bonus_confirmation,
-    menu, restart
-)
-from group import (
-    show_settings, handle_settings, save_settings, handle_group_message, 
-    handle_admin_actions, admin_panel, show_group_statistics, show_orders
-)
-from user import profile, support
-from referral import referral_program
-from keyboards import user_keyboard, input_type_keyboard
-from database import conn, cursor
-from states import *
-from dotenv import load_dotenv
-import os
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+import config
+import database
+import handlers
+import group
+import referral
+from user import profile, support  # предполагается, что эти функции есть в user.py
+from keyboards import main_menu_keyboard
 
-load_dotenv()
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-GROUP_CHAT_ID = int(os.getenv('GROUP_CHAT_ID'))
-
+# Настройка логирования
 logging.basicConfig(
-    format='🎮 %(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger('CryptoBot')
-logger.setLevel(logging.DEBUG)
-
-async def set_bot_commands(application):
-    """Установка команд в меню бота"""
-    commands = [
-        BotCommand("menu", "Показать меню/кнопки"),
-        BotCommand("restart", "Перезапуск бота, если что-то пошло не так")
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
     ]
-    await application.bot.set_my_commands(commands)
-    logger.info("Команды /menu и /restart добавлены в меню бота")
+)
+logger = logging.getLogger(__name__)
 
 def main():
-    application = Application.builder().token(TOKEN).build()
+    # Инициализация БД
+    database.init_db()
+    logger.info("База данных инициализирована")
 
-    settings_edit_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Chat(chat_id=GROUP_CHAT_ID) & filters.Regex(r'^(📈 Накрутка|🎁 Кэшбэк|👥 Рефералы|🔢 Лимиты|⏳ Время истечения|🔙 Назад)$'), handle_settings),
-            CallbackQueryHandler(handle_settings, pattern='^set_')
-        ],
-        states={
-            SETTING_PARAM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, save_settings)
-            ]
-        },
-        fallbacks=[
-            CommandHandler('cancel', back_handler)
-        ],
-        allow_reentry=False,
-        conversation_timeout=300
-    )
+    # Создание приложения
+    application = Application.builder().token(config.TELEGRAM_TOKEN).build()
 
-    exchange_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(r'^🔄 Новый обмен$'), start_exchange)],
-        states={
-            SELECTING_CRYPTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_crypto)],
-            SELECTING_INPUT_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_input_type)],
-            SELECTING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_amount)],
-            CONFIRMING_BONUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bonus_confirmation)],
-            CONFIRMING_DETAILS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_confirmation_details),
-            ],
-            ENTERING_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet)],
-        },
-        fallbacks=[CommandHandler('cancel', back_handler)],
-        conversation_timeout=300
-    )
+    # Команды
+    application.add_handler(CommandHandler("start", handlers.start))
+    application.add_handler(CommandHandler("menu", handlers.menu))
+    application.add_handler(CommandHandler("restart", handlers.restart))
+    application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("support", support))
+    application.add_handler(CommandHandler("referral", referral.referral_program))
+    application.add_handler(CommandHandler("myreferrals", referral.my_referrals))
 
-    application.add_handlers([
-        CommandHandler('admin', admin_panel),
-        MessageHandler(filters.Chat(chat_id=GROUP_CHAT_ID) & filters.Regex(r'^(⚙️ Настройки|📊 Статистика|📮 Заявки)$'), 
-                       lambda update, context: show_settings(update, context) if update.message.text == "⚙️ Настройки" 
-                       else show_group_statistics(update, context) if update.message.text == "📊 Статистика" 
-                       else show_orders(update, context)),
-        settings_edit_handler,
-        MessageHandler(filters.Chat(chat_id=GROUP_CHAT_ID) & filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(📈 Накрутка|🎁 Кэшбэк|👥 Рефералы|🔢 Лимиты|⏳ Время истечения|🔙 Назад)$'), handle_group_message),
-        CallbackQueryHandler(handle_admin_actions, pattern='^(approve|reject)_'),
-        CommandHandler('start', start),
-        CommandHandler('menu', menu),
-        CommandHandler('restart', restart),
-        exchange_handler,
-        MessageHandler(filters.Regex(r'^👤 Профиль$'), profile),
-        MessageHandler(filters.Regex(r'^📢 Поддержка$'), support),
-        MessageHandler(filters.Regex(r'^🎁 Рефералы$'), referral_program),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, back_handler)
-    ])
+    # Админ-панель (только в группе)
+    application.add_handler(CommandHandler("admin", group.admin_panel))
+    application.add_handler(CallbackQueryHandler(group.admin_callback, pattern="^admin_"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group.handle_admin_input))
 
-    application.post_init = set_bot_commands
+    # ConversationHandler для обмена
+    application.add_handler(handlers.get_conversation_handler())
 
-    logger.info("Запуск бота...")
+    # Обработка остальных текстовых сообщений (можно добавить)
+    # application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ...))
+
+    logger.info("Бот запущен")
     application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
